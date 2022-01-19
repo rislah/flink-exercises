@@ -26,6 +26,8 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
+import org.apache.flink.shaded.curator4.com.google.common.hash.BloomFilter;
+import org.apache.flink.shaded.curator4.com.google.common.hash.Funnels;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -34,6 +36,7 @@ import org.apache.flink.util.Collector;
 import org.rislah.common.PageView;
 
 import java.io.IOException;
+import java.nio.charset.Charset;
 import java.time.Duration;
 
 /**
@@ -83,7 +86,8 @@ public class StreamingJob {
                 "source");
 
         pageViewStream
-                .process(new MapDeduplicationProcessFunction())
+                .process(new BloomDeduplicationProcessFunction())
+//                .process(new MapDeduplicationProcessFunction())
                 .print();
 
 
@@ -108,6 +112,35 @@ public class StreamingJob {
                 seen.put(pageView, null);
                 collector.collect(pageView);
             }
+        }
+    }
+
+    public static class BloomDeduplicationProcessFunction extends ProcessFunction<PageView, PageView> {
+        private static final int BF_CARDINAL_THRESHOLD = 10;
+        private static final double BF_FALSE_POSITIVE_RATE = 0.01;
+        private volatile BloomFilter<String> userIdFilter;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            super.open(parameters);
+            long start = System.currentTimeMillis();
+            userIdFilter = BloomFilter.create(Funnels.stringFunnel(Charset.defaultCharset()), BF_CARDINAL_THRESHOLD, BF_FALSE_POSITIVE_RATE);
+            long end = System.currentTimeMillis();
+            System.out.println("Created Guava BloomFilter: " + (start - end));
+        }
+
+        @Override
+        public void processElement(PageView pageView, ProcessFunction<PageView, PageView>.Context context, Collector<PageView> collector) throws Exception {
+            String userId = pageView.getUserId();
+            if (!userIdFilter.mightContain(userId)) {
+                userIdFilter.put(userId);
+                collector.collect(pageView);
+            }
+        }
+
+        @Override
+        public void close() throws Exception {
+            userIdFilter = null;
         }
     }
 }
